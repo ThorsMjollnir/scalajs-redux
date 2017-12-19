@@ -10,7 +10,7 @@ version := "1.0.0-SNAPSHOT"
 
 scalaVersion := "2.12.4"
 
-scalacOptions += "-P:scalajs:sjsDefinedByDefault"
+scalacOptions ++= Seq("-P:scalajs:sjsDefinedByDefault", "-language:experimental.macros")
 
 libraryDependencies ++= Seq(
   "io.circe" %%% "circe-core" % "0.8.0",

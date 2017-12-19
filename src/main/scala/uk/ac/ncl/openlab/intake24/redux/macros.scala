@@ -1,90 +1,101 @@
 package uk.ac.ncl.openlab.intake24.redux
 
-import io.circe.Encoder
+import scala.reflect.macros.whitebox
 
-import scala.language.experimental.macros
-import scala.reflect.macros.{blackbox, whitebox}
-import scala.scalajs.js
+object macros {
 
-object Macros {
-  def actionFromJs[T](action: js.Dynamic): Option[T] = macro actionFromJsImpl[T]
+  implicit def deriveActionEncoder[T]: ActionEncoder[T] = macro actionEncoderImpl[T]
 
-  def actionToJs[T](action: T): js.Any = macro actionToJsImpl[T]
+  implicit def deriveActionDecoder[T]: ActionDecoder[T] = macro actionDecoderImpl[T]
 
-  def actionToJsImpl[T: c.WeakTypeTag](c: whitebox.Context)(action: c.Tree): c.Tree = {
+  def actionEncoderImpl[T: c.WeakTypeTag](c: whitebox.Context): c.Tree = {
     import c.universe._
 
-    val symbol = c.weakTypeOf[T].typeSymbol
+    val rootClass = c.weakTypeOf[T].typeSymbol
 
-    if (!symbol.isClass || !symbol.asClass.isSealed)
+    if (!rootClass.isClass || !rootClass.asClass.isSealed)
       c.abort(c.enclosingPosition, "Sealed trait or abstract class type expected")
     else {
 
-      val circeImports = List(q"import io.circe._", q"import io.circe.syntax._", q"import io.circe.generic.auto._", q"import io.circe.scalajs.convertJsonToJs")
+      val imports = List(q"import scala.scalajs.js",
+        q"import io.circe._",
+        q"import io.circe.syntax._",
+        q"import io.circe.generic.auto._",
+        q"import io.circe.scalajs._")
 
-      val subclasses = symbol.asClass.knownDirectSubclasses.toList
+      val subclasses = rootClass.asClass.knownDirectSubclasses.toList
 
       val matchClauses: List[c.Tree] = subclasses.map {
         cls =>
+          /*
+
+          This check is disabled because it triggers a probable bug in Scala/Scala.js compiler causing
+          recompilation to break. 'clean' fixes the issue which is why I assume it is a bug but I have no
+          idea how to debug something like this.
+
+          This will trigger a compile error anyway if an attempt to match on a non-case class is made.
+
           if (!cls.asClass.isCaseClass)
-            c.abort(c.enclosingPosition, "Not a case class: " + cls.asClass.fullName + ". Only case classes are supported.")
-          else if (cls.isModuleClass)
+          c.abort(c.enclosingPosition, "Not a case class: " + cls.asClass.fullName + ". Only case classes are supported.")
+          */
+          if (cls.isModuleClass)
             cq"x: $cls => (JsonObject.empty, ${cls.fullName})"
           else
             cq"x: $cls => (x.asJsonObject, ${cls.fullName})"
       }
 
-      q"""
-          ..$circeImports
+      q"""new uk.ac.ncl.openlab.intake24.redux.ActionEncoder[$rootClass] {
+          ..$imports
 
-         val (payload, typeName) = $action match {
-            case ..$matchClauses
+             def encode(action: $rootClass) = {
+               val (payload, typeName) = action match {
+                 case ..$matchClauses
+             }
+
+             convertJsonToJs(Json.fromJsonObject(payload.add("type", Json.fromString(typeName))))
+           }
          }
-
-         convertJsonToJs(Json.fromJsonObject(payload.add("type", Json.fromString(typeName))))
        """
     }
   }
 
-  def actionFromJsImpl[T: c.WeakTypeTag](c: blackbox.Context)(action: c.Tree): c.Tree = {
+  def actionDecoderImpl[T: c.WeakTypeTag](c: whitebox.Context): c.Tree = {
     import c.universe._
 
-    val symbol = c.weakTypeOf[T].typeSymbol
+    val rootClass = c.weakTypeOf[T].typeSymbol
 
-    if (!symbol.isClass || !symbol.asClass.isSealed)
+    if (!rootClass.isClass || !rootClass.asClass.isSealed)
       c.abort(c.enclosingPosition, "Sealed trait or abstract class type expected")
     else {
 
-      val circeImports = List(q"import io.circe._", q"import io.circe.syntax._", q"import io.circe.generic.auto._", q"import io.circe.scalajs.convertJsToJson")
+      val imports = List(q"import scala.scalajs.js",
+        q"import io.circe._",
+        q"import io.circe.syntax._",
+        q"import io.circe.generic.auto._",
+        q"import io.circe.scalajs._")
 
-      val subclasses = symbol.asClass.knownDirectSubclasses.toList
-
-
-      val parsePayload =
-        q"""def parsePayload[T](action: js.Dynamic)(implicit decoder: Decoder[T]): Option[T] =
-                       (for (json <- convertJsToJson(action);
-                              parsed <- json.as[T])
-                          yield parsed) match {
-                          case Left(err) =>
-                            js.Dynamic.global.console.error("Could not parse Redux action: " + err.getMessage)
-                            None
-                          case Right(res) =>
-                            Some(res)
-                        }"""
-
-      val actionType = q"""val actionType = $action.`type`.toString"""
+      val subclasses = rootClass.asClass.knownDirectSubclasses.toList
 
       val parseSubclasses = subclasses.filterNot(_.isAbstract).foldLeft(q"None": c.Tree) {
         case (cont, cls) =>
 
-          if (!cls.asClass.isCaseClass)
-            c.abort(c.enclosingPosition, "Not a case class: " + cls.asClass.fullName + ". Only case classes are supported.")
+          // if (!cls.asClass.isCaseClass)
+          // c.abort(c.enclosingPosition, "Not a case class: " + cls.asClass.fullName + ". Only case classes are supported.")
 
           val classNameLiteral = cls.asClass.fullName
-          q"""if (actionType == $classNameLiteral) parsePayload[$cls]($action) else $cont"""
+          q"""if (actionType == $classNameLiteral) parsePayload[$cls](action) else $cont"""
       }
 
-      q"..$circeImports;$parsePayload;$actionType;$parseSubclasses"
+      q"""new uk.ac.ncl.openlab.intake24.redux.ActionDecoder[$rootClass] {
+        ..$imports;
+
+            def decode(action: js.Dynamic): Option[$rootClass] = {
+              val actionType = action.`type`.toString
+
+              $parseSubclasses
+            }
+         }
+      """
     }
   }
 }
